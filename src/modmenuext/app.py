@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import partial
+import html
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -163,15 +165,14 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
+        self.details_tabs = QTabWidget()
+
+        mod_tab = QWidget()
+        mod_tab_layout = QVBoxLayout(mod_tab)
         self.summary_box = QTextEdit()
         self.summary_box.setReadOnly(True)
         self.summary_box.setMinimumHeight(170)
-        layout.addWidget(self.summary_box)
-
-        self.details_tabs = QTabWidget()
-
-        config_tab = QWidget()
-        config_tab_layout = QVBoxLayout(config_tab)
+        mod_tab_layout.addWidget(self.summary_box)
         self.config_scroll = QScrollArea()
         self.config_scroll.setWidgetResizable(True)
         self.config_container = QWidget()
@@ -179,8 +180,8 @@ class MainWindow(QMainWindow):
         self.config_layout.addWidget(QLabel("Select a mod to edit its configs."))
         self.config_layout.addStretch(1)
         self.config_scroll.setWidget(self.config_container)
-        config_tab_layout.addWidget(self.config_scroll)
-        self.details_tabs.addTab(config_tab, "Config")
+        mod_tab_layout.addWidget(self.config_scroll)
+        self.details_tabs.addTab(mod_tab, "Selected Mod")
 
         repository_tab = QWidget()
         repository_layout = QVBoxLayout(repository_tab)
@@ -272,6 +273,7 @@ class MainWindow(QMainWindow):
         if self.mod_list.count() > 0:
             self.mod_list.setCurrentRow(target_row if target_row >= 0 else 0)
         else:
+            self._set_formatted_text(self.summary_box, "No mod selected.")
             self._show_mod_details(None)
 
     def _refresh_repository(self) -> None:
@@ -303,7 +305,7 @@ class MainWindow(QMainWindow):
     def _show_mod_details(self, mod: ModInfo | None) -> None:
         self._clear_config_layout()
         if mod is None:
-            self.summary_box.setPlainText("No mod selected.")
+            self._set_formatted_text(self.summary_box, "No mod selected.")
             self.config_layout.addWidget(QLabel("Select a mod to edit its configs."))
             self.config_layout.addStretch(1)
             return
@@ -318,7 +320,7 @@ class MainWindow(QMainWindow):
             "",
             self._translate_for_mod(mod, mod.description) or "No manifest description found.",
         ]
-        self.summary_box.setPlainText("\n".join(summary_lines))
+        self._set_formatted_text(self.summary_box, "\n".join(summary_lines))
         self.toggle_button.setText("Disable" if mod.enabled else "Enable")
 
         if not mod.configs:
@@ -342,12 +344,12 @@ class MainWindow(QMainWindow):
 
     def _on_repository_selected(self, current: QListWidgetItem | None) -> None:
         if current is None:
-            self.repository_summary.setPlainText("No repository mod selected.")
+            self._set_formatted_text(self.repository_summary, "No repository mod selected.")
             return
         mod_id = current.data(Qt.ItemDataRole.UserRole)
         repo_mod = next((entry for entry in self.repository_mods if entry.mod_id == mod_id), None)
         if repo_mod is None:
-            self.repository_summary.setPlainText("No repository mod selected.")
+            self._set_formatted_text(self.repository_summary, "No repository mod selected.")
             return
         summary = [
             f"Name: {repo_mod.name}",
@@ -357,7 +359,7 @@ class MainWindow(QMainWindow):
             "",
             repo_mod.readme or "No repository README available.",
         ]
-        self.repository_summary.setPlainText("\n".join(summary))
+        self._set_formatted_text(self.repository_summary, "\n".join(summary))
 
     def _create_config_widget(self, mod: ModInfo, section: str, entry: str, metadata: dict[str, Any]) -> QWidget:
         value = get_runtime_value(self.runtime_config, mod.mod_id or mod.name, section, entry)
@@ -552,6 +554,35 @@ class MainWindow(QMainWindow):
             rgba = [round(float(part), 3) for part in value.args]
             return f"Color {rgba}"
         return "Choose Color"
+
+    def _set_formatted_text(self, widget: QTextEdit, text: str) -> None:
+        widget.setHtml(self._format_display_text(text))
+
+    @staticmethod
+    def _format_display_text(text: str) -> str:
+        normalized = MainWindow._normalize_display_text(text)
+        escaped = html.escape(normalized)
+        escaped = escaped.replace("\n", "<br>")
+        escaped = re.sub(r"\[b\](.*?)\[/b\]", r"<b>\1</b>", escaped, flags=re.IGNORECASE | re.DOTALL)
+        escaped = re.sub(r"\[i\](.*?)\[/i\]", r"<i>\1</i>", escaped, flags=re.IGNORECASE | re.DOTALL)
+        escaped = re.sub(r"\[u\](.*?)\[/u\]", r"<u>\1</u>", escaped, flags=re.IGNORECASE | re.DOTALL)
+        escaped = re.sub(
+            r"\[center\](.*?)\[/center\]",
+            r"<div style='text-align:center'>\1</div>",
+            escaped,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        escaped = re.sub(r"\[/?[^\]]+\]", "", escaped)
+        return f"<div style='white-space: pre-wrap'>{escaped}</div>"
+
+    @staticmethod
+    def _normalize_display_text(text: Any) -> str:
+        normalized = "" if text is None else str(text)
+        normalized = normalized.replace("\\r\\n", "\n")
+        normalized = normalized.replace("\\n", "\n")
+        normalized = normalized.replace("\\t", "\t")
+        normalized = normalized.replace("\\/", "/")
+        return normalized
 
     def _translate_for_mod(self, mod: ModInfo, value: Any) -> str:
         translated = resolve_translation_key(value, mod.translations, self.current_locale, mod.master_locale)
