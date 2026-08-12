@@ -5,49 +5,68 @@ from typing import Any
 import zipfile
 
 from .godot_variant import parse_variant
+from .logging_utils import get_logger
+
+
+logger = get_logger("localization")
 
 
 def load_archive_translations(archive_path) -> tuple[dict[str, dict[str, Any]], str]:
     if not zipfile.is_zipfile(archive_path):
+        logger.warning("Skipping localization load for non-zip mod archive: %s", archive_path)
         return {}, "en"
 
-    with zipfile.ZipFile(archive_path) as archive:
-        translation_entry = next(
-            (name for name in archive.namelist() if PurePosixPath(name).name == "REPLACE_TRANSLATIONS.gd"),
-            "",
-        )
-        if not translation_entry:
-            return {}, "en"
-        text = archive.read(translation_entry).decode("utf-8-sig", errors="replace")
-        base_folder = PurePosixPath(translation_entry).parent
-        translations = _extract_translation_dictionary(text)
-        if not isinstance(translations, dict):
-            return {}, "en"
-        master_locale = str(translations.get("master_locale", "en"))
-        merged = _normalize_translation_dict(translations)
-        file_entries = translations.get("file", {})
-        if isinstance(file_entries, dict):
-            for relative_path, metadata in file_entries.items():
-                delimiter = "|"
-                if isinstance(metadata, str):
-                    delimiter = metadata
-                elif isinstance(metadata, dict):
-                    delimiter = str(metadata.get("string", delimiter))
-                csv_path = str((base_folder / str(relative_path)).as_posix())
-                if csv_path in archive.namelist():
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            translation_entry = next(
+                (name for name in archive.namelist() if PurePosixPath(name).name == "REPLACE_TRANSLATIONS.gd"),
+                "",
+            )
+            if not translation_entry:
+                logger.info("No REPLACE_TRANSLATIONS.gd found in %s", archive_path)
+                return {}, "en"
+            text = archive.read(translation_entry).decode("utf-8-sig", errors="replace")
+            base_folder = PurePosixPath(translation_entry).parent
+            translations = _extract_translation_dictionary(text)
+            if not isinstance(translations, dict) or not translations:
+                logger.warning("Failed to parse translation dictionary from %s in %s", translation_entry, archive_path)
+                return {}, "en"
+            master_locale = str(translations.get("master_locale", "en"))
+            merged = _normalize_translation_dict(translations)
+            file_entries = translations.get("file", {})
+            if isinstance(file_entries, dict):
+                for relative_path, metadata in file_entries.items():
+                    delimiter = "|"
+                    if isinstance(metadata, str):
+                        delimiter = metadata
+                    elif isinstance(metadata, dict):
+                        delimiter = str(metadata.get("string", delimiter))
+                    csv_path = str((base_folder / str(relative_path)).as_posix())
+                    if csv_path not in archive.namelist():
+                        logger.warning("Translation CSV %s referenced by %s was not found in %s", csv_path, translation_entry, archive_path)
+                        continue
                     csv_text = archive.read(csv_path).decode("utf-8-sig", errors="replace")
                     parsed = parse_translation_csv(csv_text, delimiter)
+                    if not parsed:
+                        logger.warning("Translation CSV %s in %s did not yield any translations", csv_path, archive_path)
+                        continue
                     for locale, strings in parsed.items():
                         merged.setdefault(locale, {}).update(strings)
-        return merged, master_locale
+            logger.info("Loaded %d localization locales from %s", len(merged), archive_path)
+            return merged, master_locale
+    except Exception:
+        logger.exception("Failed to load localization data from %s", archive_path)
+        return {}, "en"
 
 
 def parse_translation_csv(text: str, delimiter: str = "|") -> dict[str, dict[str, str]]:
     lines = text.splitlines()
     if not lines:
+        logger.warning("Translation CSV was empty")
         return {}
     header = lines[0].split(delimiter)
     if not header or header[0] != "locale" or len(header) <= 1:
+        logger.warning("Translation CSV header was invalid for delimiter %r", delimiter)
         return {}
     languages = header[1:]
     dictionary = {language: {} for language in languages}
@@ -126,9 +145,11 @@ def _extract_translation_dictionary(text: str) -> dict[str, Any]:
     marker = "const TRANSLATIONS"
     start = text.find(marker)
     if start == -1:
+        logger.warning("Translation source did not contain const TRANSLATIONS")
         return {}
     brace_start = text.find("{", start)
     if brace_start == -1:
+        logger.warning("Translation source contained const TRANSLATIONS without an opening brace")
         return {}
     depth = 0
     in_string = False
@@ -156,6 +177,10 @@ def _extract_translation_dictionary(text: str) -> dict[str, Any]:
                 end = index + 1
                 break
     if end == -1:
+        logger.warning("Translation source contained an unterminated TRANSLATIONS dictionary")
         return {}
     parsed = parse_variant(text[brace_start:end])
-    return parsed if isinstance(parsed, dict) else {}
+    if not isinstance(parsed, dict):
+        logger.warning("Parsed TRANSLATIONS value was not a dictionary")
+        return {}
+    return parsed
