@@ -35,6 +35,17 @@ class ModInfo:
         return self.name or self.archive_path.name
 
 
+@dataclass
+class RepositoryMod:
+    mod_id: str
+    name: str
+    author: str
+    readme: str
+    icon_url: str
+    zip_url: str
+    zip_name: str
+
+
 def scan_mods(mods_dir: Path) -> list[ModInfo]:
     if not mods_dir.exists():
         return []
@@ -120,6 +131,70 @@ def install_mod_from_url(url: str, mods_dir: Path) -> Path:
         temporary_path = Path(temporary.name)
     temporary_path.replace(target)
     return target
+
+
+def fetch_repository_catalog() -> list[RepositoryMod]:
+    url = "https://raw.githubusercontent.com/rwqfsfasxc100/dv_update_database/refs/heads/main/github_fetcher_store/compiled_topic_store.json"
+    request = Request(url, headers={"User-Agent": "ModMenuExt/0.1"})
+    with urlopen(request) as response:
+        payload = json.load(response)
+
+    mods: list[RepositoryMod] = []
+    if not isinstance(payload, dict):
+        return mods
+
+    for mod_id, item in payload.items():
+        if not isinstance(item, dict):
+            continue
+        formatted = item.get("formatted", {})
+        header = formatted.get("header_data", {}) if isinstance(formatted, dict) else {}
+        mods.append(
+            RepositoryMod(
+                mod_id=str(header.get("MOD_ID", mod_id)),
+                name=str(header.get("MOD_NAME", mod_id)),
+                author=str(header.get("AUTHOR", "")),
+                readme=str(formatted.get("readme", "")),
+                icon_url=str(item.get("icon_path", "")),
+                zip_url=str(item.get("zip_filename", "")),
+                zip_name=str(header.get("MOD_ZIP_NAME", Path(str(item.get("zip_filename", "downloaded_mod.zip"))).name)),
+            )
+        )
+    mods.sort(key=lambda entry: entry.name.casefold())
+    return mods
+
+
+def fetch_latest_manifest(manifest_url: str) -> dict[str, dict[str, Any]]:
+    if not manifest_url:
+        return {}
+    request = Request(manifest_url, headers={"User-Agent": "ModMenuExt/0.1"})
+    with urlopen(request) as response:
+        text = response.read().decode("utf-8-sig", errors="replace")
+    from .godot_config import parse_godot_config_text
+
+    return parse_godot_config_text(text)
+
+
+def compare_versions(current_version: str, latest_version: str) -> int:
+    current_parts = _parse_version_string(current_version)
+    latest_parts = _parse_version_string(latest_version)
+    width = max(len(current_parts), len(latest_parts), 3)
+    current_parts.extend([0] * (width - len(current_parts)))
+    latest_parts.extend([0] * (width - len(latest_parts)))
+    if current_parts < latest_parts:
+        return -1
+    if current_parts > latest_parts:
+        return 1
+    return 0
+
+
+def _parse_version_string(value: str) -> list[int]:
+    parts: list[int] = []
+    for part in str(value).split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    return parts
 
 
 def resolve_download_url(url: str) -> tuple[str, str]:
