@@ -70,6 +70,8 @@ class MainWindow(QMainWindow):
         self.repository_mods: list[RepositoryMod] = []
         self.runtime_config: dict[str, dict[str, Any]] = {}
         self.current_locale = QLocale.system().name()
+        self.shared_translations: dict[str, dict[str, Any]] = {}
+        self.shared_master_locale = "en"
 
         self._build_ui()
         self._autodetect_paths()
@@ -240,8 +242,22 @@ class MainWindow(QMainWindow):
         else:
             self.runtime_config = {}
         self.mods = scan_mods(self.mods_dir) if self.mods_dir else []
+        self._rebuild_shared_translations()
         self._populate_mod_list(selected_archive_path)
         self.statusBar().showMessage("State refreshed", 3000)
+
+    def _rebuild_shared_translations(self) -> None:
+        shared: dict[str, dict[str, Any]] = {}
+        master_locale = "en"
+        for mod in self.mods:
+            if not mod.enabled:
+                continue
+            if mod.master_locale:
+                master_locale = mod.master_locale
+            for locale, locale_entries in mod.translations.items():
+                shared.setdefault(locale, {}).update(locale_entries)
+        self.shared_translations = shared
+        self.shared_master_locale = master_locale
 
     def _populate_mod_list(self, selected_archive_path: Path | None = None) -> None:
         self.mod_list.clear()
@@ -538,7 +554,10 @@ class MainWindow(QMainWindow):
         return "Choose Color"
 
     def _translate_for_mod(self, mod: ModInfo, value: Any) -> str:
-        return resolve_translation_key(value, mod.translations, self.current_locale, mod.master_locale)
+        translated = resolve_translation_key(value, mod.translations, self.current_locale, mod.master_locale)
+        if translated != value:
+            return translated
+        return resolve_translation_key(value, self.shared_translations, self.current_locale, self.shared_master_locale)
 
     def _toggle_selected_mod(self) -> None:
         mod = self._current_mod()
