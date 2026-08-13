@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import argparse
 
-from .app import main
-from .logging_utils import configure_logging
+try:
+    from .app import main
+    from .logging_utils import configure_logging
+except ImportError:
+    # PyInstaller can execute this as a top-level script where relative imports are unavailable.
+    from modmenuext.app import main
+    from modmenuext.logging_utils import configure_logging
 
 
 def parse_args() -> argparse.Namespace:
