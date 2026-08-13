@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
+import ssl
 import shutil
 import tempfile
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 import zipfile
+
+import certifi
 
 from .godot_config import load_godot_config, truncate_section_key, write_godot_config
 from .localization import load_archive_translations
@@ -50,6 +53,12 @@ class MissingDependenciesError(ValueError):
     def __init__(self, dependencies: list[str]) -> None:
         self.dependencies = dependencies
         super().__init__("Missing dependencies: " + ", ".join(dependencies))
+
+
+def _open_url(request: Request):
+    # Use certifi's CA bundle so HTTPS validation works in packaged Linux builds.
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urlopen(request, context=context)
 
 
 def scan_mods(mods_dir: Path) -> list[ModInfo]:
@@ -134,7 +143,7 @@ def install_mod_from_url(url: str, mods_dir: Path, enforce_dependencies: bool = 
         safe_name = f"{safe_name}.zip"
     target = mods_dir / safe_name
     request = Request(download_url, headers={"User-Agent": "ModMenuExt/0.1"})
-    with urlopen(request) as response, tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temporary:
+    with _open_url(request) as response, tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temporary:
         shutil.copyfileobj(response, temporary)
         temporary_path = Path(temporary.name)
     try:
@@ -222,7 +231,7 @@ def _ensure_archive_dependencies_satisfied(archive_path: Path, mods_dir: Path) -
 def fetch_repository_catalog() -> list[RepositoryMod]:
     url = "https://raw.githubusercontent.com/rwqfsfasxc100/dv_update_database/refs/heads/main/github_fetcher_store/compiled_topic_store.json"
     request = Request(url, headers={"User-Agent": "ModMenuExt/0.1"})
-    with urlopen(request) as response:
+    with _open_url(request) as response:
         payload = json.load(response)
 
     mods: list[RepositoryMod] = []
@@ -253,7 +262,7 @@ def fetch_latest_manifest(manifest_url: str) -> dict[str, dict[str, Any]]:
     if not manifest_url:
         return {}
     request = Request(manifest_url, headers={"User-Agent": "ModMenuExt/0.1"})
-    with urlopen(request) as response:
+    with _open_url(request) as response:
         text = response.read().decode("utf-8-sig", errors="replace")
     from .godot_config import parse_godot_config_text
 
@@ -293,7 +302,7 @@ def resolve_download_url(url: str) -> tuple[str, str]:
             owner, repo = parts[0], parts[1]
             api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
             request = Request(api_url, headers={"User-Agent": "ModMenuExt/0.1", "Accept": "application/vnd.github+json"})
-            with urlopen(request) as response:
+            with _open_url(request) as response:
                 payload = json.load(response)
             assets = payload.get("assets", [])
             for asset in assets:
