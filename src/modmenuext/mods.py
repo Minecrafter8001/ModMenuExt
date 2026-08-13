@@ -46,6 +46,12 @@ class RepositoryMod:
     zip_name: str
 
 
+class MissingDependenciesError(ValueError):
+    def __init__(self, dependencies: list[str]) -> None:
+        self.dependencies = dependencies
+        super().__init__("Missing dependencies: " + ", ".join(dependencies))
+
+
 def scan_mods(mods_dir: Path) -> list[ModInfo]:
     if not mods_dir.exists():
         return []
@@ -110,15 +116,17 @@ def get_runtime_value(document: dict[str, dict[str, Any]], mod_id: str, section:
     return document.get(section_key, {}).get(key)
 
 
-def install_mod_from_path(source: Path, mods_dir: Path) -> Path:
+def install_mod_from_path(source: Path, mods_dir: Path, enforce_dependencies: bool = True) -> Path:
     mods_dir.mkdir(parents=True, exist_ok=True)
+    if enforce_dependencies:
+        _ensure_archive_dependencies_satisfied(source, mods_dir)
     target = mods_dir / source.name
     if source.resolve() != target.resolve():
         shutil.copy2(source, target)
     return target
 
 
-def install_mod_from_url(url: str, mods_dir: Path) -> Path:
+def install_mod_from_url(url: str, mods_dir: Path, enforce_dependencies: bool = True) -> Path:
     download_url, filename = resolve_download_url(url)
     mods_dir.mkdir(parents=True, exist_ok=True)
     safe_name = filename or Path(urlparse(download_url).path).name or "downloaded_mod.zip"
@@ -129,8 +137,86 @@ def install_mod_from_url(url: str, mods_dir: Path) -> Path:
     with urlopen(request) as response, tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as temporary:
         shutil.copyfileobj(response, temporary)
         temporary_path = Path(temporary.name)
-    temporary_path.replace(target)
+    try:
+        if enforce_dependencies:
+            _ensure_archive_dependencies_satisfied(temporary_path, mods_dir)
+        try:
+            temporary_path.replace(target)
+        except OSError:
+            # Cross-volume moves (e.g. C: temp -> G: game library) need a copy+remove path.
+            shutil.move(str(temporary_path), str(target))
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink(missing_ok=True)
     return target
+
+
+def extract_dependency_ids_from_manifest(manifest: dict[str, Any]) -> list[str]:
+    sections: list[Any] = [
+        manifest.get("dependencies"),
+        manifest.get("dependency"),
+        manifest.get("requires"),
+        manifest.get("required_mods"),
+        manifest.get("depends_on"),
+    ]
+    manifest_definitions = manifest.get("manifest_definitions", {})
+    if isinstance(manifest_definitions, dict):
+        sections.extend(
+            [
+                manifest_definitions.get("dependancy_mod_ids"),
+                manifest_definitions.get("dependency_mod_ids"),
+                manifest_definitions.get("dependencies"),
+                manifest_definitions.get("required_mods"),
+                manifest_definitions.get("requires"),
+            ]
+        )
+
+    output: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate:
+                output.append(candidate)
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(item, bool):
+                    if item:
+                        collect(key)
+                    continue
+                collect(item)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                collect(item)
+
+    for section in sections:
+        collect(section)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for dependency in output:
+        lowered = dependency.casefold()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        unique.append(dependency)
+    return unique
+
+
+def _ensure_archive_dependencies_satisfied(archive_path: Path, mods_dir: Path) -> None:
+    manifest = _read_manifest_from_archive(archive_path)
+    if not manifest:
+        return
+    dependencies = extract_dependency_ids_from_manifest(manifest)
+    if not dependencies:
+        return
+    installed = scan_mods(mods_dir)
+    installed_ids = {mod.mod_id.strip().casefold() for mod in installed if mod.mod_id.strip()}
+    missing = [dependency for dependency in dependencies if dependency.casefold() not in installed_ids]
+    if missing:
+        raise MissingDependenciesError(missing)
 
 
 def fetch_repository_catalog() -> list[RepositoryMod]:
