@@ -15,7 +15,7 @@ Features:
 
 - Download and install mods from direct zip URLs or GitHub repository/release URLs.
 
-- Fully ModMenu2 and dv_update_database compatible (thanks hev_ :3)
+- Fully [ModMenu2](https://github.com/rwqfsfasxc100/ModMenu2) and [dv_update_database](https://github.com/rwqfsfasxc100/dv_update_database) compatible (thanks hev_ :3)
   
 
 ## Autodetected Paths
