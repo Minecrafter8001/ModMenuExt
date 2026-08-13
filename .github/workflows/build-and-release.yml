@@ -22,11 +22,13 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: ModMenuExt-windows
-            artifact_path: dist/ModMenuExt.exe
+            artifact_path: dist/ModMenuExt-windows.exe
+            binary_name: ModMenuExt-windows
             pyinstaller_target: src\\modmenuext\\__main__.py
           - os: ubuntu-latest
             artifact_name: ModMenuExt-linux
-            artifact_path: dist/ModMenuExt
+            artifact_path: dist/ModMenuExt-linux
+            binary_name: ModMenuExt-linux
             pyinstaller_target: src/modmenuext/__main__.py
 
     steps:
@@ -46,7 +48,7 @@ jobs:
 
       - name: Build with PyInstaller
         run: >
-          pyinstaller --noconfirm --onefile --windowed --name ModMenuExt --paths src
+          pyinstaller --noconfirm --onefile --windowed --name ${{ matrix.binary_name }} --paths src
           ${{ matrix.pyinstaller_target }}
 
       - name: Upload artifact
@@ -75,5 +77,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-artifacts/ModMenuExt-windows/ModMenuExt.exe
-            release-artifacts/ModMenuExt-linux/ModMenuExt
+            release-artifacts/ModMenuExt-windows/ModMenuExt-windows.exe
+            release-artifacts/ModMenuExt-linux/ModMenuExt-linux
