@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import __version__
 from .godot_variant import TaggedValue, is_color_value
 from .localization import resolve_translation_key
 from .mods import (
@@ -106,7 +107,7 @@ class ModListRowWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("MME - ModMenuExt")
+        self.setWindowTitle(f"MME - ModMenuExt V{__version__}")
         self.resize(1380, 860)
         self.settings_path = self._settings_file_path()
 
