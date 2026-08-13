@@ -1,11 +1,9 @@
 
 # ModMenuExt
 
-  
 
 External Delta-V mod manager built in Python.
 
-  
 
 Features:
 
@@ -17,8 +15,7 @@ Features:
 
 - Download and install mods from direct zip URLs or GitHub repository/release URLs.
 
-- Edit ModMenu2-compatible mod configs in `user://cfg/Mod_Configurations.cfg`.
-
+- Fully ModMenu2 and dv_update_database compatible (thanks hev_ :3)
   
 
 ## Autodetected Paths
