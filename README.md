@@ -34,14 +34,6 @@ Features:
 
 - Linux Flatpak Steam library file: `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf`
 
-  
-
-## TODO:
-
- - [ ] Modpack support
-
-  
-  
 
 ## Setup
 
