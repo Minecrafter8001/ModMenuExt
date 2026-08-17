@@ -6,6 +6,11 @@ import platform
 import re
 from typing import Any
 
+from .logging_utils import get_logger
+
+
+logger = get_logger("steam")
+
 
 def parse_vdf(text: str) -> dict[str, Any]:
     tokens = re.findall(r'"(?:\\.|[^"\\])*"|\{|\}', text)
@@ -62,23 +67,28 @@ def discover_steam_root() -> Path | None:
         ]
     for candidate in candidates:
         if candidate.exists() and (candidate / "steamapps").exists():
+            logger.info("Detected Steam root at %s", candidate)
             return candidate
+    logger.warning("Could not detect a Steam root from known locations")
     return None
 
 
 def discover_steam_libraries(steam_root: Path | None = None) -> list[Path]:
     root = steam_root or discover_steam_root()
     if root is None:
+        logger.warning("Steam library discovery skipped because Steam root is unavailable")
         return []
 
     libraries = [root]
     library_file = root / "steamapps" / "libraryfolders.vdf"
     if not library_file.exists():
+        logger.info("Steam library file not found at %s; using root only", library_file)
         return libraries
 
     try:
         parsed = parse_vdf(library_file.read_text(encoding="utf-8", errors="ignore"))
     except Exception:
+        logger.exception("Failed to parse Steam library file %s", library_file)
         return libraries
 
     library_data = parsed.get("libraryfolders", parsed)
@@ -89,6 +99,7 @@ def discover_steam_libraries(steam_root: Path | None = None) -> list[Path]:
                 candidate = Path(path_value)
                 if candidate.exists() and candidate not in libraries:
                     libraries.append(candidate)
+    logger.info("Discovered %d Steam library path(s)", len(libraries))
     return libraries
 
 
@@ -108,11 +119,14 @@ def discover_delta_v_install() -> Path | None:
             if "rings of saturn" in normalized or "delta-v" in normalized or install_dir.casefold() == "delta-v":
                 candidate = steamapps / "common" / install_dir
                 if candidate.exists():
+                    logger.info("Detected Delta-V install via manifest at %s", candidate)
                     return candidate
 
         for fallback in (steamapps / "common").glob("*Delta*V*"):
             if fallback.is_dir():
+                logger.info("Detected Delta-V install via fallback scan at %s", fallback)
                 return fallback
+    logger.warning("Could not detect Delta-V install directory")
     return None
 
 
@@ -146,11 +160,16 @@ def discover_delta_v_user_dir() -> Path | None:
 
     for candidate in candidates:
         if (candidate / "cfg").exists() or (candidate / "savegame.dv").exists():
+            logger.info("Detected Delta-V user directory at %s", candidate)
             return candidate
     for candidate in candidates:
         if candidate.exists():
+            logger.info("Using existing Delta-V user directory candidate %s", candidate)
             return candidate
-    return candidates[0] if candidates else None
+    selected = candidates[0] if candidates else None
+    if selected is not None:
+        logger.warning("No existing Delta-V user directory found; defaulting to %s", selected)
+    return selected
 
 
 def discover_game_executable(game_dir: Path) -> Path | None:
@@ -164,12 +183,15 @@ def discover_game_executable(game_dir: Path) -> Path | None:
     ]
     for candidate in preferred:
         if candidate.exists():
+            logger.info("Detected game executable at %s", candidate)
             return candidate
     executable_patterns = ["*.exe", "*.x86_64"]
     for pattern in executable_patterns:
         executables = list(game_dir.glob(pattern))
         if executables:
+            logger.info("Detected game executable by pattern %s at %s", pattern, executables[0])
             return executables[0]
+    logger.warning("No game executable detected in %s", game_dir)
     return None
 
 

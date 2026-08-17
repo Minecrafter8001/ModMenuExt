@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Any
 
 from .godot_variant import parse_variant, serialize_variant
+from .logging_utils import get_logger
+
+
+logger = get_logger("godot_config")
 
 
 def truncate_mod_id(mod_id: str) -> str:
@@ -44,7 +48,11 @@ def parse_godot_config_text(text: str) -> dict[str, dict[str, Any]]:
         while True:
             candidate = "\n".join(value_lines).strip()
             if _looks_complete(candidate):
-                value = parse_variant(candidate)
+                try:
+                    value = parse_variant(candidate)
+                except Exception:
+                    logger.exception("Failed to parse value for key '%s' in section '%s'", key.strip(), current_section)
+                    raise
                 sections[current_section][key.strip()] = value
                 break
             index += 1
@@ -58,8 +66,11 @@ def parse_godot_config_text(text: str) -> dict[str, dict[str, Any]]:
 
 def load_godot_config(path: Path) -> dict[str, dict[str, Any]]:
     if not path.exists():
+        logger.info("Config file not found: %s", path)
         return {}
-    return parse_godot_config_text(path.read_text(encoding="utf-8-sig"))
+    sections = parse_godot_config_text(path.read_text(encoding="utf-8-sig"))
+    logger.info("Loaded %d config section(s) from %s", len(sections), path)
+    return sections
 
 
 def write_godot_config(path: Path, sections: dict[str, dict[str, Any]]) -> None:
@@ -71,6 +82,7 @@ def write_godot_config(path: Path, sections: dict[str, dict[str, Any]]) -> None:
             chunks.append(f"{key}={serialize_variant(value)}")
         chunks.append("")
     path.write_text("\n".join(chunks).rstrip() + "\n", encoding="utf-8")
+    logger.info("Wrote %d config section(s) to %s", len(sections), path)
 
 
 def _looks_complete(text: str) -> bool:

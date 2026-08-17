@@ -5,6 +5,11 @@ import json
 import math
 from typing import Any
 
+from .logging_utils import get_logger
+
+
+logger = get_logger("godot_variant")
+
 
 class ParseError(ValueError):
     pass
@@ -187,7 +192,14 @@ class VariantParser:
 
 
 def parse_variant(text: str) -> Any:
-    return VariantParser(text).parse()
+    try:
+        return VariantParser(text).parse()
+    except Exception:
+        snippet = str(text)
+        if len(snippet) > 180:
+            snippet = snippet[:177] + "..."
+        logger.exception("Failed to parse Godot variant from text snippet: %r", snippet)
+        raise
 
 
 def serialize_variant(value: Any) -> str:
@@ -219,6 +231,7 @@ def serialize_variant(value: Any) -> str:
             f"{serialize_variant(str(key))}: {serialize_variant(item)}" for key, item in value.items()
         )
         return f"{{ {joined} }}"
+    logger.error("serialize_variant received unsupported type: %s", type(value).__name__)
     raise TypeError(f"unsupported variant type: {type(value)!r}")
 
 

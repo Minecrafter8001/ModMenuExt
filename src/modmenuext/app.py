@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -45,15 +46,18 @@ from PySide6.QtWidgets import (
 
 from . import __version__
 from .godot_variant import TaggedValue, is_color_value
+from .logging_utils import get_logger
 from .localization import resolve_translation_key
+from .modpacks import build_export_modpack_payload, build_import_candidate_urls, parse_modpack_entries, read_modpack_file, write_modpack_file
 from .mods import (
+    build_update_database_zip_url,
     MissingDependenciesError,
     ModInfo,
     RepositoryMod,
     compare_versions,
     extract_dependency_ids_from_manifest,
-    fetch_latest_manifest,
     fetch_repository_catalog,
+    fetch_update_database_manifest_index,
     get_runtime_value,
     install_mod_from_path,
     install_mod_from_url,
@@ -63,6 +67,9 @@ from .mods import (
     toggle_mod,
 )
 from .steam import discover_delta_v_install, discover_delta_v_user_dir
+
+
+logger = get_logger("app")
 
 
 class ModListRowWidget(QWidget):
@@ -108,6 +115,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"MME - ModMenuExt V{__version__}")
+        logger.info("Starting ModMenuExt %s", __version__)
         self.resize(1380, 860)
         self.settings_path = self._settings_file_path()
 
@@ -118,6 +126,7 @@ class MainWindow(QMainWindow):
         self.config_path: Path | None = None
         self.mods: list[ModInfo] = []
         self.repository_mods: list[RepositoryMod] = []
+        self.update_database_index: dict[str, dict[str, Any]] | None = None
         self.runtime_config: dict[str, dict[str, Any]] = {}
         self.current_locale = QLocale.system().name()
         self.shared_translations: dict[str, dict[str, Any]] = {}
@@ -173,8 +182,15 @@ class MainWindow(QMainWindow):
         check_dependencies_action.triggered.connect(self._check_dependencies)
         update_all_action = QAction("Update All", self)
         update_all_action.triggered.connect(self._update_all_mods)
+        import_modpack_action = QAction("Import Modpack", self)
+        import_modpack_action.triggered.connect(self._import_modpack)
+        export_modpack_action = QAction("Export Modpack", self)
+        export_modpack_action.triggered.connect(self._export_modpack)
         file_menu.addAction(install_url_action)
         file_menu.addAction(install_zip_action)
+        file_menu.addSeparator()
+        file_menu.addAction(import_modpack_action)
+        file_menu.addAction(export_modpack_action)
         file_menu.addSeparator()
         file_menu.addAction(check_dependencies_action)
         file_menu.addAction(update_all_action)
@@ -200,19 +216,6 @@ class MainWindow(QMainWindow):
         properties_menu.addAction(autodetect_action)
         properties_menu.addAction(self.auto_detect_startup_action)
         properties_menu.addAction(paths_menu_action)
-
-    def _build_header(self) -> QWidget:
-        card = QFrame()
-        card.setObjectName("heroCard")
-        self._set_panel_frame(card)
-        layout = QHBoxLayout(card)
-        layout.setContentsMargins(22, 18, 22, 18)
-
-        copy = QVBoxLayout()
-        layout.addLayout(copy, 1)
-
-        layout.addStretch(1)
-        return card
 
     def _build_left_column(self) -> QWidget:
         column = QWidget()
@@ -329,61 +332,6 @@ class MainWindow(QMainWindow):
         update_fields()
         dialog.exec()
 
-    def _build_paths_box(self) -> QWidget:
-        box = QFrame()
-        box.setObjectName("sectionCard")
-        self._set_panel_frame(box)
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("Paths")
-        title.setObjectName("sectionTitle")
-        layout.addWidget(title)
-
-        game_dir_edit = QLineEdit()
-        game_dir_edit.setReadOnly(True)
-        user_dir_edit = QLineEdit()
-        user_dir_edit.setReadOnly(True)
-        mods_dir_edit = QLineEdit()
-        mods_dir_edit.setReadOnly(True)
-
-        game_dir_edit.setPlaceholderText("Delta-V install directory")
-        user_dir_edit.setPlaceholderText("Delta-V user data directory")
-        mods_dir_edit.setPlaceholderText("Mods directory")
-
-        layout.addWidget(self._build_path_row("Game directory", game_dir_edit))
-        layout.addWidget(self._build_path_row("User data directory", user_dir_edit))
-        layout.addWidget(self._build_path_row("Mods directory", mods_dir_edit))
-
-        game_buttons = QHBoxLayout()
-        browse_game_button = QPushButton("Browse Game Folder")
-        browse_game_button.clicked.connect(self._browse_game_dir)
-        browse_user_button = QPushButton("Browse Userdata Folder")
-        browse_user_button.clicked.connect(self._browse_user_dir)
-        open_mods_button = QPushButton("Browse Mods Folder")
-        open_mods_button.clicked.connect(self._open_mods_folder)
-        game_buttons.addWidget(browse_game_button)
-        game_buttons.addWidget(browse_user_button)
-        game_buttons.addWidget(open_mods_button)
-        game_buttons.addStretch(1)
-
-        layout.addLayout(game_buttons)
-        return box
-
-    def _build_path_row(self, label_text: str, editor: QLineEdit) -> QWidget:
-        card = QFrame()
-        card.setObjectName("pathCard")
-        self._set_panel_frame(card)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(6)
-        label = QLabel(label_text)
-        label.setObjectName("pathLabel")
-        layout.addWidget(label)
-        layout.addWidget(editor)
-        return card
-
     def _build_mods_panel(self) -> QWidget:
         widget = QFrame()
         widget.setObjectName("sectionCard")
@@ -408,6 +356,15 @@ class MainWindow(QMainWindow):
         self.mod_list.currentItemChanged.connect(self._on_mod_selected)
         self.mod_list.itemDoubleClicked.connect(self._on_mod_double_clicked)
         layout.addWidget(self.mod_list)
+
+        modpack_buttons = QHBoxLayout()
+        self.import_modpack_button = QPushButton("Import Modpack")
+        self.import_modpack_button.clicked.connect(self._import_modpack)
+        self.export_modpack_button = QPushButton("Export Modpack")
+        self.export_modpack_button.clicked.connect(self._export_modpack)
+        modpack_buttons.addWidget(self.import_modpack_button)
+        modpack_buttons.addWidget(self.export_modpack_button)
+        layout.addWidget(self._wrap_layout(modpack_buttons))
         return widget
 
     def _build_details_panel(self) -> QWidget:
@@ -490,6 +447,7 @@ class MainWindow(QMainWindow):
         self.game_dir = discover_delta_v_install()
         self.user_dir = discover_delta_v_user_dir()
         self.mods_dir_override = None
+        logger.info("Auto-detected paths: game_dir=%s user_dir=%s", self.game_dir, self.user_dir)
         self._sync_paths()
         self.refresh_state()
         self._save_app_settings()
@@ -499,6 +457,7 @@ class MainWindow(QMainWindow):
         if selected:
             self.game_dir = Path(selected)
             self.mods_dir_override = None
+            logger.info("User selected game directory: %s", self.game_dir)
             self._sync_paths()
             self.refresh_state()
             self._save_app_settings()
@@ -507,6 +466,7 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "Choose Delta-V user data directory")
         if selected:
             self.user_dir = Path(selected)
+            logger.info("User selected user directory: %s", self.user_dir)
             self._sync_paths()
             self.refresh_state()
             self._save_app_settings()
@@ -516,8 +476,10 @@ class MainWindow(QMainWindow):
         if selected:
             mods_path = Path(selected)
             self.mods_dir_override = mods_path
+            logger.info("User selected mods directory override: %s", mods_path)
             if mods_path.name.casefold() == "mods":
                 self.game_dir = mods_path.parent
+                logger.info("Derived game directory from mods folder: %s", self.game_dir)
             self._sync_paths()
             self.refresh_state()
             self._save_app_settings()
@@ -531,10 +493,12 @@ class MainWindow(QMainWindow):
     def _load_app_settings(self) -> None:
         try:
             if not self.settings_path.is_file():
+                logger.info("Settings file not found at %s", self.settings_path)
                 return
             with self.settings_path.open("r", encoding="utf-8") as handle:
                 settings = json.load(handle)
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            logger.exception("Failed to load app settings from %s", self.settings_path)
             return
 
         cached_game = settings.get("game_dir")
@@ -554,6 +518,7 @@ class MainWindow(QMainWindow):
                 self.mods_dir_override = candidate
         self.dark_mode = bool(settings.get("dark_mode", self.dark_mode))
         self.auto_detect_paths_on_startup = bool(settings.get("auto_detect_paths_on_startup", self.auto_detect_paths_on_startup))
+        logger.info("Loaded app settings: dark_mode=%s auto_detect_paths_on_startup=%s", self.dark_mode, self.auto_detect_paths_on_startup)
 
     def _save_app_settings(self) -> None:
         payload = {
@@ -567,12 +532,15 @@ class MainWindow(QMainWindow):
             self.settings_path.parent.mkdir(parents=True, exist_ok=True)
             with self.settings_path.open("w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
+            logger.info("Saved app settings to %s", self.settings_path)
         except OSError:
+            logger.exception("Failed to save app settings to %s", self.settings_path)
             return
 
     def _sync_paths(self) -> None:
         self.mods_dir = self.mods_dir_override or (self.game_dir / "mods" if self.game_dir else None)
         self.config_path = self.user_dir / "cfg" / "Mod_Configurations.cfg" if self.user_dir else None
+        logger.info("Synced paths: mods_dir=%s config_path=%s", self.mods_dir, self.config_path)
         if self.game_dir_edit is not None:
             self.game_dir_edit.setText(str(self.game_dir or ""))
         if self.user_dir_edit is not None:
@@ -583,6 +551,7 @@ class MainWindow(QMainWindow):
     def _prompt_create_mods_dir_on_startup(self) -> None:
         if self.mods_dir is None or self.mods_dir.exists():
             return
+        logger.info("Mods folder missing at startup: %s", self.mods_dir)
         answer = QMessageBox.question(
             self,
             "Create Mods Folder?",
@@ -591,12 +560,15 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes,
         )
         if answer != QMessageBox.StandardButton.Yes:
+            logger.info("User declined creation of mods folder %s", self.mods_dir)
             return
         try:
             self.mods_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
+            logger.exception("Failed to create mods folder %s", self.mods_dir)
             QMessageBox.critical(self, "Create Folder Failed", f"Could not create mods folder:\n{exc}")
             return
+        logger.info("Created mods folder %s", self.mods_dir)
         self.statusBar().showMessage("Created mods folder", 3000)
         self._save_app_settings()
 
@@ -610,6 +582,7 @@ class MainWindow(QMainWindow):
         self._rebuild_shared_translations()
         self._populate_mod_list(selected_archive_path)
         self.mod_count_label.setText(f"{len(self.mods)} mod{'s' if len(self.mods) != 1 else ''}")
+        logger.info("State refreshed: mods=%d selected=%s", len(self.mods), selected_archive_path)
         self.statusBar().showMessage("State refreshed", 3000)
 
     def _rebuild_shared_translations(self) -> None:
@@ -676,9 +649,11 @@ class MainWindow(QMainWindow):
         return ModListRowWidget(title, buttons)
 
     def _refresh_repository(self) -> None:
+        logger.info("Refreshing repository catalog")
         try:
             self.repository_mods = fetch_repository_catalog()
         except Exception as exc:
+            logger.exception("Repository refresh failed")
             QMessageBox.critical(self, "Repository refresh failed", str(exc))
             return
         self.repository_list.clear()
@@ -692,6 +667,7 @@ class MainWindow(QMainWindow):
             self.repository_list.setCurrentRow(0)
         else:
             self._set_formatted_text(self.repository_summary, "No repository mods found.")
+        logger.info("Repository refresh complete: entries=%d", len(self.repository_mods))
 
     def _on_mod_selected(self, current: QListWidgetItem | None) -> None:
         if current is None:
@@ -920,6 +896,7 @@ class MainWindow(QMainWindow):
             return
         mod_key = mod.mod_id or mod.name or mod.display_name
         save_runtime_value(self.config_path, self.runtime_config, mod_key, section, entry, value)
+        logger.info("Saved config value: mod=%s section=%s entry=%s", mod_key, section, entry)
         if bool(metadata.get("require_restart", False)):
             self.statusBar().showMessage("Saved. This setting requires a game restart.", 5000)
         else:
@@ -961,11 +938,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_theme(self, checked: bool) -> None:
         self.dark_mode = bool(checked)
+        logger.info("Theme toggled: dark_mode=%s", self.dark_mode)
         self._apply_theme()
         self._save_app_settings()
 
     def _toggle_auto_detect_on_startup(self, checked: bool) -> None:
         self.auto_detect_paths_on_startup = bool(checked)
+        logger.info("Auto-detect-on-startup toggled: %s", self.auto_detect_paths_on_startup)
         self._save_app_settings()
 
     def _apply_theme(self) -> None:
@@ -1121,11 +1100,13 @@ class MainWindow(QMainWindow):
         mod = self._current_mod()
         if mod is None:
             return
+        logger.info("Toggling mod %s (enabled=%s)", mod.display_name, mod.enabled)
         if mod.enabled:
             dependents = self._collect_dependent_mods(mod)
             if dependents:
                 decision = self._show_dependency_impact_dialog("disable", dependents)
                 if decision == "cancel":
+                    logger.info("User cancelled disabling %s due to dependency warning", mod.display_name)
                     return
                 if decision == "all":
                     errors: list[str] = []
@@ -1137,6 +1118,7 @@ class MainWindow(QMainWindow):
                         except OSError as exc:
                             errors.append(f"{dependent.display_name}: {exc}")
                     if errors:
+                        logger.warning("Failed disabling dependent mods while toggling %s: %s", mod.display_name, "; ".join(errors))
                         QMessageBox.critical(self, "Disable failed", "\n".join(errors))
                         return
 
@@ -1144,11 +1126,13 @@ class MainWindow(QMainWindow):
         try:
             toggle_mod(mod)
         except OSError as exc:
+            logger.exception("Toggle failed for %s", mod.display_name)
             QMessageBox.critical(self, "Toggle failed", str(exc))
             return
         target_archive = selected_archive.with_name(selected_archive.name + ".disabled") if mod.enabled else selected_archive.with_name(selected_archive.name[:-9] if selected_archive.name.endswith(".disabled") else selected_archive.stem)
         self.refresh_state()
         self._select_mod_by_archive(target_archive)
+        logger.info("Toggle complete for %s; new archive path %s", mod.display_name, target_archive)
 
     def _toggle_mod_by_archive(self, archive_path: Path) -> None:
         self._select_mod_by_archive(archive_path)
@@ -1158,57 +1142,108 @@ class MainWindow(QMainWindow):
         mod = next((entry for entry in self.mods if entry.archive_path == archive_path), None)
         if mod is None:
             return
-        message, _ = self._check_mod_update(mod)
-        QMessageBox.information(self, "Update Check", message)
+        message, download_url = self._check_mod_update(mod)
+        logger.info("Update check for %s: %s", mod.display_name, message)
+        if "update available" not in message.casefold():
+            QMessageBox.information(self, "Update Check", message)
+            return
+        if not download_url:
+            logger.warning("Update found for %s but no download URL was available", mod.display_name)
+            QMessageBox.information(self, "Update Check", message)
+            return
+
+        decision = QMessageBox(self)
+        decision.setWindowTitle("Update Check")
+        decision.setIcon(QMessageBox.Icon.Question)
+        decision.setText(message)
+        update_button = decision.addButton("Update", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = decision.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        decision.setDefaultButton(update_button)
+        decision.exec()
+
+        if decision.clickedButton() is cancel_button:
+            logger.info("User cancelled individual update for %s", mod.display_name)
+            return
+
+        progress = QProgressDialog("Downloading update...", "Cancel", 0, 0, self)
+        progress.setWindowTitle("Updating Mod")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+
+        try:
+            install_mod_from_url(download_url, self.mods_dir)
+            logger.info("Updated mod %s from %s", mod.display_name, download_url)
+        except Exception as exc:
+            logger.exception("Failed to update mod %s from %s", mod.display_name, download_url)
+            QMessageBox.critical(self, "Update Failed", f"{mod.display_name}: {exc}")
+            return
+        finally:
+            progress.close()
+
+        self.refresh_state()
+        self._select_mod_by_archive(archive_path)
+        QMessageBox.information(self, "Update Complete", f"Updated {mod.display_name}.")
 
     def _check_mod_update(self, mod: ModInfo) -> tuple[str, str | None]:
-        if not mod.manifest_url:
-            return f"{mod.display_name}: no manifest_url for update checks", None
-        try:
-            latest_manifest = fetch_latest_manifest(mod.manifest_url)
-        except Exception as exc:
-            return f"{mod.display_name}: failed to check updates ({exc})", None
-        latest_version = self._format_manifest_version(latest_manifest)
-        if not latest_version:
-            return f"{mod.display_name}: update source returned no version", None
+        update_db_candidate = self._resolve_update_database_candidate(mod)
+        if update_db_candidate is None:
+            logger.info("No dv_update_database entry for mod id '%s' (%s)", mod.mod_id, mod.display_name)
+            return f"{mod.display_name}: no dv_update_database entry for this mod id", None
+
+        latest_version, download_url, source = update_db_candidate
         comparison = compare_versions(mod.version or "0.0.0", latest_version)
         if comparison < 0:
-            download_url = self._resolve_update_download_url(mod, latest_manifest)
-            download_suffix = "" if download_url else " (no download URL found)"
-            return f"{mod.display_name}: update available ({mod.version or 'unknown'} -> {latest_version}){download_suffix}", download_url
+            logger.info(
+                "Update available for %s: %s -> %s via %s",
+                mod.display_name,
+                mod.version or "unknown",
+                latest_version,
+                source,
+            )
+            return f"{mod.display_name}: update available ({mod.version or 'unknown'} -> {latest_version}) via {source}", download_url
+        logger.info("Mod %s is up to date at %s", mod.display_name, mod.version or latest_version)
         return f"{mod.display_name}: up to date ({mod.version or latest_version})", None
 
-    def _resolve_update_download_url(self, mod: ModInfo, latest_manifest: dict[str, dict[str, Any]]) -> str | None:
-        candidates: list[Any] = []
-        links = latest_manifest.get("links", {})
-        manifest_defs = latest_manifest.get("manifest_definitions", {})
-        if isinstance(links, dict):
-            candidates.extend([
-                links.get("zip_url"),
-                links.get("download_url"),
-                links.get("release_zip"),
-                links.get("mod_zip"),
-                links.get("zip"),
-                links.get("url"),
-            ])
-        if isinstance(manifest_defs, dict):
-            candidates.extend([
-                manifest_defs.get("download_url"),
-                manifest_defs.get("zip_url"),
-            ])
-        if isinstance(mod.links, dict):
-            candidates.extend([
-                mod.links.get("zip_url"),
-                mod.links.get("download_url"),
-                mod.links.get("release_zip"),
-                mod.links.get("mod_zip"),
-                mod.links.get("zip"),
-                mod.links.get("url"),
-            ])
-        for candidate in candidates:
-            if isinstance(candidate, str) and candidate.strip().startswith(("http://", "https://")):
-                return candidate.strip()
-        return None
+    def _resolve_update_database_candidate(self, mod: ModInfo) -> tuple[str, str | None, str] | None:
+        mod_id = mod.mod_id.strip()
+        if not mod_id:
+            return None
+
+        index = self._get_update_database_index()
+        if not index:
+            return None
+
+        entry = index.get(mod_id)
+        if not isinstance(entry, dict):
+            return None
+
+        try:
+            major = int(entry.get("major", 0))
+            minor = int(entry.get("minor", 0))
+            bugfix = int(entry.get("bugfix", 0))
+        except (TypeError, ValueError):
+            return None
+
+        latest_version = f"{major}.{minor}.{bugfix}"
+        file_name = str(entry.get("file_name", "")).strip()
+        if not file_name:
+            return latest_version, None, "dv_update_database"
+
+        download_url = build_update_database_zip_url(mod_id, major, minor, bugfix, file_name)
+        return latest_version, download_url, "dv_update_database"
+
+    def _get_update_database_index(self) -> dict[str, dict[str, Any]]:
+        if self.update_database_index is not None:
+            return self.update_database_index
+        try:
+            self.update_database_index = fetch_update_database_manifest_index()
+            logger.info("Loaded %d update index entries from dv_update_database", len(self.update_database_index))
+        except Exception:
+            self.update_database_index = {}
+            logger.exception("Failed to load dv_update_database manifest index")
+        return self.update_database_index
 
     def _check_dependencies(self) -> None:
         if not self.mods:
@@ -1224,8 +1259,10 @@ class MainWindow(QMainWindow):
             if missing:
                 issues.append(f"{mod.display_name}: missing {', '.join(missing)}")
         if issues:
+            logger.warning("Dependency check found %d issue(s)", len(issues))
             QMessageBox.warning(self, "Dependency Check", "\n".join(issues))
             return
+        logger.info("Dependency check found no missing dependencies")
         QMessageBox.information(self, "Dependency Check", "No missing dependencies detected.")
 
     def _extract_dependency_ids(self, mod: ModInfo) -> list[str]:
@@ -1239,10 +1276,28 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Update All", "No mods found.")
             return
 
+        logger.info("Starting Update All for %d mods", len(self.mods))
+
+        check_progress = QProgressDialog("Checking for updates...", "Cancel", 0, len(self.mods), self)
+        check_progress.setWindowTitle("Update All")
+        check_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        check_progress.setMinimumDuration(0)
+        check_progress.show()
+
+        pending_updates: list[tuple[ModInfo, str, str, str]] = []
         updated: list[str] = []
         skipped: list[str] = []
 
-        for mod in self.mods:
+        for index, mod in enumerate(self.mods, start=1):
+            check_progress.setLabelText(f"Checking {mod.display_name}...")
+            check_progress.setValue(index - 1)
+            QApplication.processEvents()
+            if check_progress.wasCanceled():
+                check_progress.close()
+                logger.info("Update All cancelled during check phase")
+                QMessageBox.information(self, "Update All", "Update check cancelled.")
+                return
+
             message, download_url = self._check_mod_update(mod)
             if "update available" not in message.casefold():
                 skipped.append(message)
@@ -1250,11 +1305,68 @@ class MainWindow(QMainWindow):
             if not download_url:
                 skipped.append(message)
                 continue
+            latest = self._resolve_update_database_candidate(mod)
+            latest_version = latest[0] if latest is not None else "unknown"
+            pending_updates.append((mod, download_url, mod.version or "unknown", latest_version))
+
+        check_progress.setValue(len(self.mods))
+        check_progress.close()
+
+        if not pending_updates:
+            logger.info("Update All check complete: no pending updates")
+            lines: list[str] = ["No updates available."]
+            if skipped:
+                lines.extend(["", "Skipped:", *skipped])
+            QMessageBox.information(self, "Update All", "\n".join(lines))
+            return
+
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("Update All")
+        confirm.setIcon(QMessageBox.Icon.Question)
+        confirm.setText(f"{len(pending_updates)} update(s) are ready to install.")
+        planned_lines = [
+            f"- {mod.display_name}: {current_version} -> {latest_version}"
+            for mod, _, current_version, latest_version in pending_updates
+        ]
+        confirm.setInformativeText(
+            "Press Update to continue, or Cancel to stop.\n\n"
+            "Planned updates:\n"
+            + "\n".join(planned_lines)
+        )
+        update_button = confirm.addButton("Update", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = confirm.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        confirm.setDefaultButton(update_button)
+        confirm.exec()
+
+        if confirm.clickedButton() is cancel_button:
+            logger.info("Update All cancelled at confirmation step")
+            self.statusBar().showMessage("Update All cancelled.", 4000)
+            return
+
+        download_progress = QProgressDialog("Installing updates...", "Cancel", 0, len(pending_updates), self)
+        download_progress.setWindowTitle("Update All")
+        download_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        download_progress.setMinimumDuration(0)
+        download_progress.show()
+
+        for index, (mod, download_url, _, _) in enumerate(pending_updates, start=1):
+            download_progress.setLabelText(f"Updating {mod.display_name} ({index}/{len(pending_updates)})...")
+            download_progress.setValue(index - 1)
+            QApplication.processEvents()
+            if download_progress.wasCanceled():
+                skipped.append("Update process cancelled by user")
+                logger.info("Update All cancelled during install phase after %d successful updates", len(updated))
+                break
             try:
                 install_mod_from_url(download_url, self.mods_dir)
                 updated.append(mod.display_name)
+                logger.info("Updated %s from %s", mod.display_name, download_url)
             except Exception as exc:
+                logger.exception("Update failed for %s from %s", mod.display_name, download_url)
                 skipped.append(f"{mod.display_name}: update failed ({exc})")
+
+        download_progress.setValue(len(pending_updates))
+        download_progress.close()
 
         self.refresh_state()
         lines: list[str] = []
@@ -1266,17 +1378,20 @@ class MainWindow(QMainWindow):
             lines.extend(skipped)
         if not lines:
             lines.append("No updates available.")
+        logger.info("Update All finished. Updated=%d Skipped=%d", len(updated), len(skipped))
         QMessageBox.information(self, "Update All", "\n".join(lines))
 
     def _delete_mod_by_archive(self, archive_path: Path) -> None:
         mod = next((entry for entry in self.mods if entry.archive_path == archive_path), None)
         if mod is None:
             return
+        logger.info("Delete requested for mod archive %s", archive_path)
         delete_targets: list[ModInfo] = [mod]
         dependents = self._collect_dependent_mods(mod)
         if dependents:
             decision = self._show_dependency_impact_dialog("delete", dependents)
             if decision == "cancel":
+                logger.info("User cancelled delete for %s due to dependency warning", mod.display_name)
                 return
             if decision == "all":
                 delete_targets.extend(dependents)
@@ -1289,6 +1404,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
+                logger.info("User cancelled delete confirmation for %s", mod.display_name)
                 return
 
         errors: list[str] = []
@@ -1302,8 +1418,10 @@ class MainWindow(QMainWindow):
             except OSError as exc:
                 errors.append(f"{target_mod.display_name}: {exc}")
         if errors:
+            logger.warning("Delete failed for one or more targets: %s", "; ".join(errors))
             QMessageBox.critical(self, "Delete failed", "\n".join(errors))
             return
+        logger.info("Deleted %d mod archive(s)", len(seen_paths))
         self.refresh_state()
 
     def _show_missing_dependencies_dialog(self, dependencies: list[str]) -> str:
@@ -1379,21 +1497,28 @@ class MainWindow(QMainWindow):
     ) -> bool:
         try:
             installer(True)
+            logger.info("Install succeeded with dependency enforcement")
             return True
         except MissingDependenciesError as exc:
+            logger.warning("Install blocked by missing dependencies: %s", ", ".join(exc.dependencies))
             choice = self._show_missing_dependencies_dialog(exc.dependencies)
             if choice == "cancle":
+                logger.info("User cancelled install after dependency prompt")
                 return False
             if choice == "ignore":
+                logger.warning("User chose to ignore missing dependencies and continue install")
                 try:
                     installer(False)
+                    logger.info("Install succeeded without dependency enforcement")
                     return True
                 except Exception as ignore_exc:
+                    logger.exception("Install failed after ignoring dependencies")
                     QMessageBox.critical(self, failed_title, str(ignore_exc))
                     return False
 
             installed, failed = self._install_dependencies_from_repository(exc.dependencies)
             if failed:
+                logger.warning("Dependency auto-install failed for %d dependencies", len(failed))
                 lines = ["Could not install all dependencies:", *failed]
                 if installed:
                     lines.extend(["", "Installed:", *installed])
@@ -1401,14 +1526,18 @@ class MainWindow(QMainWindow):
                 return False
             try:
                 installer(True)
+                logger.info("Install succeeded after dependency auto-install")
                 return True
             except MissingDependenciesError as retry_exc:
+                logger.warning("Install still blocked by dependencies after retry: %s", ", ".join(retry_exc.dependencies))
                 QMessageBox.warning(self, "Dependency Check", "missing dependency(s):\n" + "\n".join(retry_exc.dependencies))
                 return False
             except Exception as retry_exc:
+                logger.exception("Install failed after dependency auto-install retry")
                 QMessageBox.critical(self, failed_title, str(retry_exc))
                 return False
         except Exception as exc:
+            logger.exception("Install failed before completion")
             QMessageBox.critical(self, failed_title, str(exc))
             return False
 
@@ -1421,6 +1550,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         source = Path(selected)
+        logger.info("Install from file selected: %s", source)
         if not self._install_with_dependency_prompt(
             lambda enforce: install_mod_from_path(source, mods_dir, enforce_dependencies=enforce),
             "Install failed",
@@ -1437,6 +1567,7 @@ class MainWindow(QMainWindow):
         if not ok or not url.strip():
             return
         source_url = url.strip()
+        logger.info("Install from URL requested: %s", source_url)
         if not self._install_with_dependency_prompt(
             lambda enforce: install_mod_from_url(source_url, mods_dir, enforce_dependencies=enforce),
             "Download failed",
@@ -1457,6 +1588,7 @@ class MainWindow(QMainWindow):
         if repo_mod is None or not repo_mod.zip_url:
             QMessageBox.warning(self, "No download available", "This repository entry does not provide a downloadable zip.")
             return
+        logger.info("Install selected repository mod: %s (%s)", repo_mod.name, repo_mod.mod_id)
         if not self._install_with_dependency_prompt(
             lambda enforce: install_mod_from_url(repo_mod.zip_url, mods_dir, enforce_dependencies=enforce),
             "Repository install failed",
@@ -1464,11 +1596,226 @@ class MainWindow(QMainWindow):
             return
         self.refresh_state()
 
-    def _format_manifest_version(self, manifest: dict[str, dict[str, Any]]) -> str:
-        version_info = manifest.get("version", {})
-        parts = [version_info.get("version_major"), version_info.get("version_minor"), version_info.get("version_bugfix")]
-        filtered = [str(part) for part in parts if part is not None]
-        return ".".join(filtered)
+    def _export_modpack(self) -> None:
+        if not self.mods:
+            QMessageBox.information(self, "Export Modpack", "No mods are available to export.")
+            return
+
+        payload, unsupported = build_export_modpack_payload(self.mods, self._get_update_database_index())
+        if not payload:
+            lines = [
+                "No compatible mods could be exported.",
+                "",
+                "Modpack support only exports mods with:",
+                "- a manifest mod id",
+                "- a dv_update_database entry or links/HEVLIB_GITHUB URL",
+            ]
+            if unsupported:
+                lines.extend(["", "Unsupported mods:", *unsupported])
+            QMessageBox.warning(self, "Export Modpack", "\n".join(lines))
+            return
+
+        warning_lines = [
+            "Modpack export uses HevLib/ModMenu2 format (.dvmodpack).",
+            "",
+            "Compatibility notes:",
+            "- It stores download URLs (update-db zip URL when available).",
+            "- Importing later may install newer releases than your current setup.",
+            "- Mods without update-db entries and HEVLIB_GITHUB links are skipped.",
+        ]
+        if unsupported:
+            warning_lines.extend(["", "Skipped mods (may not work via modpack):", *unsupported])
+
+        proceed = QMessageBox.question(
+            self,
+            "Export Modpack",
+            "\n".join(warning_lines),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if proceed != QMessageBox.StandardButton.Yes:
+            logger.info("Export modpack cancelled by user")
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Modpack",
+            "modpack.dvmodpack",
+            "Delta-V Modpack (*.dvmodpack);;JSON files (*.json);;All files (*)",
+        )
+        if not save_path:
+            return
+
+        target_path = Path(save_path)
+        if target_path.suffix.casefold() not in {".dvmodpack", ".json"}:
+            target_path = target_path.with_suffix(".dvmodpack")
+
+        try:
+            write_modpack_file(target_path, payload)
+        except OSError as exc:
+            logger.exception("Export modpack failed for %s", target_path)
+            QMessageBox.critical(self, "Export Modpack", f"Failed to write modpack:\n{exc}")
+            return
+
+        logger.info("Exported modpack to %s with %d entries (skipped=%d)", target_path, len(payload), len(unsupported))
+        summary = [f"Exported {len(payload)} mod entries to:\n{target_path}"]
+        if unsupported:
+            summary.extend(["", f"Skipped {len(unsupported)} unsupported mod(s)."])
+        QMessageBox.information(self, "Export Modpack", "\n".join(summary))
+
+    def _import_modpack(self) -> None:
+        mods_dir = self.mods_dir
+        if mods_dir is None:
+            QMessageBox.warning(self, "No mods folder", "Set or autodetect the Delta-V game directory first.")
+            return
+
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Modpack",
+            "",
+            "Delta-V Modpack (*.dvmodpack);;JSON files (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+
+        source = Path(selected)
+        try:
+            payload = read_modpack_file(source)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.exception("Failed to read modpack from %s", source)
+            QMessageBox.critical(self, "Import Modpack", f"Failed to read modpack file:\n{exc}")
+            return
+
+        try:
+            importable, unsupported = parse_modpack_entries(payload)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Import Modpack", str(exc))
+            return
+
+        missing_primary_url = [entry.name for entry in importable if not entry.github_url]
+
+        if not importable:
+            lines = ["No importable entries were found in this modpack."]
+            if unsupported:
+                lines.extend(["", "Unsupported entries:", *unsupported])
+            QMessageBox.warning(self, "Import Modpack", "\n".join(lines))
+            return
+
+        warning_lines = [
+            f"Ready to import {len(importable)} mod entry(ies) from {source.name}.",
+            "",
+            "Compatibility notes:",
+            "- Import tries modpack URL first, then update-db, then repository URL.",
+            "- Exact versions from the pack are not pinned.",
+            "- Private/deleted repos or non-standard releases can still fail.",
+            "- Dependency order can still require manual fixes.",
+        ]
+        if missing_primary_url:
+            warning_lines.extend(["", "Entries without primary URL (will use fallback sources):", *missing_primary_url])
+        if unsupported:
+            warning_lines.extend(["", "Entries that may not work:", *unsupported])
+
+        confirmation = QMessageBox(self)
+        confirmation.setWindowTitle("Import Modpack")
+        confirmation.setIcon(QMessageBox.Icon.Warning)
+        confirmation.setText("\n".join(warning_lines))
+        import_button = confirmation.addButton("Import", QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = confirmation.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        confirmation.setDefaultButton(import_button)
+        confirmation.exec()
+        if confirmation.clickedButton() is cancel_button:
+            logger.info("Import modpack cancelled by user: %s", source)
+            return
+
+        installed_ids = {mod.mod_id.strip().casefold() for mod in self.mods if mod.mod_id.strip()}
+        installed: list[str] = []
+        skipped: list[str] = []
+        failed: list[str] = []
+        update_database_index = self._get_update_database_index()
+
+        if not self.repository_mods:
+            try:
+                self.repository_mods = fetch_repository_catalog()
+            except Exception:
+                logger.exception("Failed to load repository catalog for modpack import fallback")
+        repository_zip_by_id = {
+            mod.mod_id.strip().casefold(): mod.zip_url.strip()
+            for mod in self.repository_mods
+            if mod.mod_id.strip() and mod.zip_url.strip()
+        }
+
+        progress = QProgressDialog("Importing modpack...", "Cancel", 0, len(importable), self)
+        progress.setWindowTitle("Import Modpack")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        for index, entry in enumerate(importable, start=1):
+            progress.setLabelText(f"Importing {entry.name} ({index}/{len(importable)})...")
+            progress.setValue(index - 1)
+            QApplication.processEvents()
+
+            if progress.wasCanceled():
+                skipped.append("Import cancelled by user")
+                logger.info("Import modpack cancelled during install phase")
+                break
+
+            if entry.mod_id.casefold() in installed_ids:
+                skipped.append(f"{entry.name}: already installed")
+                continue
+
+            candidate_urls = build_import_candidate_urls(
+                entry,
+                update_database_index,
+                repository_zip_by_id.get(entry.mod_id.casefold(), ""),
+            )
+            if not candidate_urls:
+                failed.append(f"{entry.name}: no available URL in modpack/update-db/repository")
+                continue
+
+            install_error: Exception | None = None
+            installed_from_url = ""
+            for candidate_url in candidate_urls:
+                try:
+                    install_mod_from_url(candidate_url, mods_dir, enforce_dependencies=False)
+                    installed_from_url = candidate_url
+                    break
+                except Exception as exc:
+                    install_error = exc
+                    logger.exception(
+                        "Failed importing modpack entry %s (%s) from %s",
+                        entry.name,
+                        entry.mod_id,
+                        candidate_url,
+                    )
+
+            if installed_from_url:
+                installed.append(entry.name)
+                installed_ids.add(entry.mod_id.casefold())
+                logger.info("Imported modpack entry %s (%s) from %s", entry.name, entry.mod_id, installed_from_url)
+            else:
+                reason = str(install_error) if install_error is not None else "all candidate URLs failed"
+                failed.append(f"{entry.name}: {reason}")
+
+        progress.setValue(len(importable))
+        progress.close()
+
+        self.refresh_state()
+        result_lines = [
+            f"Imported: {len(installed)}",
+            f"Skipped: {len(skipped)}",
+            f"Failed: {len(failed)}",
+        ]
+        if unsupported:
+            result_lines.append(f"Unsupported entries: {len(unsupported)}")
+        if skipped:
+            result_lines.extend(["", "Skipped details:", *skipped])
+        if failed:
+            result_lines.extend(["", "Failed details:", *failed])
+        if unsupported:
+            result_lines.extend(["", "Unsupported entries:", *unsupported])
+
+        QMessageBox.information(self, "Import Modpack", "\n".join(result_lines))
 
     def _open_mods_folder(self) -> None:
         if self.mods_dir is None:

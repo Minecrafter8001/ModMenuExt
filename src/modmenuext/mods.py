@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
+import re
 import ssl
 import shutil
 import tempfile
@@ -15,6 +16,12 @@ import certifi
 
 from .godot_config import load_godot_config, truncate_section_key, write_godot_config
 from .localization import load_archive_translations
+from .logging_utils import get_logger
+
+
+UPDATE_DATABASE_MANIFEST_INDEX_URL = "https://raw.githubusercontent.com/rwqfsfasxc100/dv_update_database/refs/heads/main/manifest_path_store.json"
+
+logger = get_logger("mods")
 
 
 @dataclass
@@ -63,6 +70,7 @@ def _open_url(request: Request):
 
 def scan_mods(mods_dir: Path) -> list[ModInfo]:
     if not mods_dir.exists():
+        logger.warning("Mods directory does not exist: %s", mods_dir)
         return []
     mods: list[ModInfo] = []
     for entry in sorted(mods_dir.iterdir(), key=lambda path: path.name.casefold()):
@@ -96,6 +104,7 @@ def scan_mods(mods_dir: Path) -> list[ModInfo]:
             mod.mod_id = mod.mod_id or details.get("MOD_ID", "")
             mod.name = details.get("MOD_NAME", entry.name)
         mods.append(mod)
+    logger.info("Scanned %d mod archive(s) from %s", len(mods), mods_dir)
     return mods
 
 
@@ -107,6 +116,7 @@ def toggle_mod(mod: ModInfo) -> Path:
         target_name = current.name[:-9] if current.name.endswith(".disabled") else current.stem
         target = current.with_name(target_name)
     current.rename(target)
+    logger.info("Toggled mod archive %s -> %s", current, target)
     return target
 
 
@@ -127,16 +137,19 @@ def get_runtime_value(document: dict[str, dict[str, Any]], mod_id: str, section:
 
 def install_mod_from_path(source: Path, mods_dir: Path, enforce_dependencies: bool = True) -> Path:
     mods_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Installing mod from path %s to %s (enforce_dependencies=%s)", source, mods_dir, enforce_dependencies)
     if enforce_dependencies:
         _ensure_archive_dependencies_satisfied(source, mods_dir)
     target = mods_dir / source.name
     if source.resolve() != target.resolve():
         shutil.copy2(source, target)
+    logger.info("Installed mod archive to %s", target)
     return target
 
 
 def install_mod_from_url(url: str, mods_dir: Path, enforce_dependencies: bool = True) -> Path:
     download_url, filename = resolve_download_url(url)
+    logger.info("Downloading mod from %s (resolved %s)", url, download_url)
     mods_dir.mkdir(parents=True, exist_ok=True)
     safe_name = filename or Path(urlparse(download_url).path).name or "downloaded_mod.zip"
     if not safe_name.casefold().endswith(".zip"):
@@ -154,6 +167,7 @@ def install_mod_from_url(url: str, mods_dir: Path, enforce_dependencies: bool = 
         except OSError:
             # Cross-volume moves (e.g. C: temp -> G: game library) need a copy+remove path.
             shutil.move(str(temporary_path), str(target))
+        logger.info("Installed downloaded mod archive to %s", target)
     finally:
         if temporary_path.exists():
             temporary_path.unlink(missing_ok=True)
@@ -211,6 +225,8 @@ def extract_dependency_ids_from_manifest(manifest: dict[str, Any]) -> list[str]:
             continue
         seen.add(lowered)
         unique.append(dependency)
+    if unique:
+        logger.info("Extracted %d dependency id(s) from manifest", len(unique))
     return unique
 
 
@@ -225,6 +241,7 @@ def _ensure_archive_dependencies_satisfied(archive_path: Path, mods_dir: Path) -
     installed_ids = {mod.mod_id.strip().casefold() for mod in installed if mod.mod_id.strip()}
     missing = [dependency for dependency in dependencies if dependency.casefold() not in installed_ids]
     if missing:
+        logger.warning("Missing dependencies for %s: %s", archive_path, ", ".join(missing))
         raise MissingDependenciesError(missing)
 
 
@@ -255,18 +272,32 @@ def fetch_repository_catalog() -> list[RepositoryMod]:
             )
         )
     mods.sort(key=lambda entry: entry.name.casefold())
+    logger.info("Fetched %d entries from repository catalog", len(mods))
     return mods
 
 
-def fetch_latest_manifest(manifest_url: str) -> dict[str, dict[str, Any]]:
-    if not manifest_url:
-        return {}
-    request = Request(manifest_url, headers={"User-Agent": "ModMenuExt/0.1"})
+def fetch_update_database_manifest_index() -> dict[str, dict[str, Any]]:
+    request = Request(UPDATE_DATABASE_MANIFEST_INDEX_URL, headers={"User-Agent": "ModMenuExt/0.1"})
     with _open_url(request) as response:
-        text = response.read().decode("utf-8-sig", errors="replace")
-    from .godot_config import parse_godot_config_text
+        payload = json.load(response)
+    if not isinstance(payload, dict):
+        logger.warning("Update database payload was not a dictionary")
+        return {}
+    output: dict[str, dict[str, Any]] = {}
+    for mod_id, value in payload.items():
+        if not isinstance(mod_id, str) or not isinstance(value, dict):
+            continue
+        output[mod_id] = value
+    logger.info("Fetched %d entries from dv_update_database manifest index", len(output))
+    return output
 
-    return parse_godot_config_text(text)
+
+def build_update_database_zip_url(mod_id: str, major: int, minor: int, bugfix: int, file_name: str) -> str:
+    safe_file_name = Path(str(file_name or "downloaded_mod.zip")).name
+    return (
+        "https://raw.githubusercontent.com/rwqfsfasxc100/dv_update_database/refs/heads/main/zip_store/"
+        f"{mod_id}/{major}.{minor}.{bugfix}/{safe_file_name}"
+    )
 
 
 def compare_versions(current_version: str, latest_version: str) -> int:
@@ -283,13 +314,10 @@ def compare_versions(current_version: str, latest_version: str) -> int:
 
 
 def _parse_version_string(value: str) -> list[int]:
-    parts: list[int] = []
-    for part in str(value).split("."):
-        try:
-            parts.append(int(part))
-        except ValueError:
-            parts.append(0)
-    return parts
+    numbers = re.findall(r"\d+", str(value))
+    if not numbers:
+        return [0]
+    return [int(part) for part in numbers]
 
 
 def resolve_download_url(url: str) -> tuple[str, str]:
@@ -298,20 +326,25 @@ def resolve_download_url(url: str) -> tuple[str, str]:
         raise ValueError("download URL must start with http:// or https://")
     if parsed.netloc.casefold().endswith("github.com"):
         parts = [part for part in parsed.path.split("/") if part]
+        if "raw" in parts or "blob" in parts:
+            return url, Path(parsed.path).name
         if len(parts) >= 2:
             owner, repo = parts[0], parts[1]
             api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
             request = Request(api_url, headers={"User-Agent": "ModMenuExt/0.1", "Accept": "application/vnd.github+json"})
-            with _open_url(request) as response:
-                payload = json.load(response)
-            assets = payload.get("assets", [])
-            for asset in assets:
-                asset_name = str(asset.get("name", ""))
-                if asset_name.casefold().endswith(".zip") and "source code" not in asset_name.casefold():
-                    return str(asset["browser_download_url"]), asset_name
-            zipball = payload.get("zipball_url")
-            if zipball:
-                return str(zipball), f"{repo}-latest.zip"
+            try:
+                with _open_url(request) as response:
+                    payload = json.load(response)
+                assets = payload.get("assets", [])
+                for asset in assets:
+                    asset_name = str(asset.get("name", ""))
+                    if asset_name.casefold().endswith(".zip") and "source code" not in asset_name.casefold():
+                        return str(asset["browser_download_url"]), asset_name
+                zipball = payload.get("zipball_url")
+                if zipball:
+                    return str(zipball), f"{repo}-latest.zip"
+            except Exception:
+                logger.warning("Falling back to direct URL after GitHub release lookup failed: %s", url)
     return url, Path(parsed.path).name
 
 
